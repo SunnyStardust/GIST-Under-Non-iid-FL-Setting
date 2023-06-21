@@ -196,7 +196,7 @@ def main(args):
                         model_input = features[:, feats_idx[0][subnet_id]]
                     else:
                         model_input = features
-                    pred = model(batched_graph, model_input)
+                    pred = sub_model(batched_graph, model_input)
                     loss = loss_fcn(pred, labels)
                     epoch_loss += loss.detach().item()
                     loss.backward()

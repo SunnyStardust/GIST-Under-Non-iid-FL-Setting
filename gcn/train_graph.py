@@ -111,7 +111,6 @@ def main(args):
             batched_graph.set_batch_num_edges(bne)
             batched_graph.set_batch_num_nodes(bnn)
             labels = labels.long()
-            # labels = torch.tensor([x[0] for x in labels]).long()
             pred = model(batched_graph, batched_graph.ndata['feat'].float())
             loss = loss_fcn(pred, labels)
             epoch_loss += loss.detach().item()
@@ -124,7 +123,6 @@ def main(args):
             dur.append(time.time() - t0)
 
         acc_train = evaluate(model, train_dataloader)
-        # acc_val = evaluate(model, features, labels, val_mask)
         acc_test = evaluate(model, test_dataloader)
         record.append([acc_train, acc_test])
 
