@@ -14,6 +14,33 @@ from dgl.data import register_data_args, load_data, LegacyTUDataset
 from gcn import GCN, GraphGCN
 from torch.utils.data.sampler import SubsetRandomSampler
 from dgl.dataloading import GraphDataLoader
+from sklearn.model_selection import train_test_split
+import random
+from random import choices
+
+def _randChunk(graphs, num_client, overlap, seed=None):
+    random.seed(seed)
+    np.random.seed(seed)
+
+    totalNum = len(graphs)
+    minSize = min(80, int(totalNum/num_client))
+    graphs_chunks = []
+    if not overlap:
+        for i in range(num_client):
+            graphs_chunks.append(graphs[i*minSize:(i+1)*minSize])
+        for g in graphs[num_client*minSize:]:
+            idx_chunk = np.random.randint(low=0, high=num_client, size=1)[0]
+            graphs_chunks[idx_chunk].append(g)
+    else:
+        sizes = np.random.randint(low=50, high=150, size=num_client)
+        for s in sizes:
+            graphs_chunks.append(choices(graphs, k=s))
+    return graphs_chunks
+
+def split_data(graphs, train=None, test=None, shuffle=True, seed=None):
+    y = torch.cat([graph[1] for graph in graphs])
+    graphs_tv, graphs_test = train_test_split(graphs, train_size=train, test_size=test, stratify=y, shuffle=shuffle, random_state=seed)
+    return graphs_tv, graphs_test
 
 def draw_acc_curve(record, save_root, save_filename):
     acc_train = np.array(record)[:, 0]
@@ -23,6 +50,7 @@ def draw_acc_curve(record, save_root, save_filename):
     plt.ylabel("Accuracy")
     plt.plot(range(len(acc_test)), acc_train, 'red', label="train")
     plt.plot(range(len(acc_test)), acc_test, 'orange', label="test")
+    # plt.ylim([0.5, 1.0])
     plt.legend()
     np.save(os.path.join(save_root, 'record_'+save_filename), record)
     plt.savefig(os.path.join(save_root, save_filename+'.jpg'))
@@ -60,24 +88,35 @@ def main(args):
                                                  args.self_loop]
     assert args.use_layernorm in ['True', 'False'], ["Only True or False for use_layernorm, get ",
                                                      args.use_layernorm]
-    assert args.use_random_proj in ['True', 'False'], ["Only True or False for use_random_proj, get ",
-                                                       args.use_random_proj]
+    assert args.non_iid in ['True', 'False'], ["Only True or False for non_iid, get ",
+                                               args.non_iid]
     use_ist = (args.use_ist == 'True')
     split_input = (args.split_input == 'True')
     split_output = (args.split_output == 'True')
     self_loop = (args.self_loop == 'True')
     use_layernorm = (args.use_layernorm == 'True')
-    use_random_proj = (args.use_random_proj == 'True')
+    non_iid = (args.non_iid == 'True')
 
     # make sure hidden layer is the correct shape
     assert (args.n_hidden % args.num_subnet) == 0
     global t0
     data = LegacyTUDataset(args.dataset)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    graphs = [(x[0].to(device), x[1].to(device)) for x in data]
     in_feats = len(data[0][0].ndata['feat'][0])
 
-    import random
-    graphs = [x for x in data]
-    random.shuffle(graphs)
+    if non_iid:
+        chunks = _randChunk(graphs, args.num_subnet, False, 10)
+        print(chunks)
+        for chunk in chunks:
+            ds_train, ds_test = split_data(chunk, train=0.8, test=0.2, shuffle=True, seed=10)
+            train_loader = GraphDataLoader(ds_train, batch_size=5, drop_last=False)
+            test_loader = GraphDataLoader(ds_test, batch_size=5, drop_last=False)
+            pass
+        return
+    else:
+        random.seed(10)
+        random.shuffle(graphs)
 
     num_examples = len(data)
     num_train = int(num_examples * 0.8)
@@ -88,8 +127,6 @@ def main(args):
         graphs, sampler=train_sampler, batch_size=5, drop_last=False)
     test_dataloader = GraphDataLoader(
         graphs, sampler=test_sampler, batch_size=5, drop_last=False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # create GCN model
     model = GraphGCN(
@@ -282,7 +319,7 @@ def main(args):
     all_test_acc = [v[1] for v in record]
     # all_val_acc = [v[1] for v in record]
     acc = evaluate(model, test_dataloader)
-    draw_acc_curve(record, "./", f"gist_graph_{args.dataset}_acc")
+    draw_acc_curve(record, "./imgs/gist", f"gist_graph_{args.dataset}_neuron{args.n_hidden}_layer{args.n_layers}_worker{args.num_subnet}_dropout{args.dropout}_lr{args.lr}")
     print(f"Best Train Accuracy: {max(all_train_acc):.4f}")
     print(f"Final Test Accuracy: {acc:.4f}")
     # print(f"Best Val Accuracy: {max(all_val_acc):.4f}")
@@ -291,11 +328,11 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GCN')
-    parser.add_argument("--dataset", type=str, default="DD")
+    parser.add_argument("--dataset", type=str, default="PROTEINS_full")
     parser.add_argument("--use_ist", type=str, default="True",
                         help="whether use IST training")
     parser.add_argument("--iter_per_site", type=int, default=5)
-    parser.add_argument("--num_subnet", type=int, default=2,
+    parser.add_argument("--num_subnet", type=int, default=8,
                         help="number of sub networks")
     parser.add_argument("--dropout", type=float, default=0.5,
                         help="dropout probability")
@@ -303,13 +340,13 @@ if __name__ == '__main__':
     parser.add_argument("--split_input", type=str, default="False")
     parser.add_argument("--gpu", type=int, default=1,
                         help="gpu")
-    parser.add_argument("--lr", type=float, default=0.01,
+    parser.add_argument("--lr", type=float, default=0.001,
                         help="learning rate")
-    parser.add_argument("--n-epochs", type=int, default=50,
+    parser.add_argument("--n-epochs", type=int, default=200,
                         help="number of training epochs")
-    parser.add_argument("--n-hidden", type=int, default=16,
+    parser.add_argument("--n-hidden", type=int, default=64,
                         help="number of hidden gcn units")
-    parser.add_argument("--n-layers", type=int, default=1,
+    parser.add_argument("--n-layers", type=int, default=2,
                         help="number of hidden gcn layers")
     parser.add_argument("--weight-decay", type=float, default=5e-4,
                         help="Weight for L2 loss")
@@ -317,7 +354,7 @@ if __name__ == '__main__':
                         help="graph self-loop (default=True)")
     parser.add_argument("--use_layernorm", type=str, default='True',
                         help="Whether use layernorm (default=False)")
-    parser.add_argument("--use_random_proj", type=str, default='True',
-                        help="Whether use random projection to densitify (default=False)")
+    parser.add_argument("--non_iid", type=str, default='False',
+                        help="Whether use non-iid data (default=False)")
     args = parser.parse_args()
     main(args)
